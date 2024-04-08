@@ -1,0 +1,115 @@
+---
+title: "Patient_Selection"
+author: "Álvaro Martínez Rubio"
+date: "01/04/2024"
+output: html_document
+---
+
+# Load Libraries 
+
+```{r}
+library(flowCore)
+library(data.table)
+library(readxl)
+```
+
+# Output directory
+
+Create a folder to export the merged FCS files of the selected patients
+
+```{r}
+destination="Selected"
+dir.create(destination)
+```
+
+# Import data
+
+The directory folder should contain one FCS file per patient
+
+```{r}
+directory="Merged"
+patients=list.files(directory)
+```
+
+# Load metadata
+
+Mainly for tracking relapse status
+
+```{r}
+database=read_excel("metadata.xlsx")
+patients=gsub(".fcs","",patients)
+metadata=data.frame(Patient=patients,Status=factor(database$RELAPSE[database$ID%in%patients]))
+levels(metadata$Status)=c("NR","R")
+```
+
+
+# Import files
+```{r}
+files=list()
+for (i in 1:length(patients)){
+  files[[i]]=read.FCS(paste0(directory,"/",patients[[i]],".fcs"))
+}
+names(files)=patients
+```
+
+# Remove patients with less than 10000 cells
+```{r}
+files[which(sapply(files,nrow)<10000)]=NULL
+markers=lapply(files,function(x){unname(x@parameters@data$name)})
+ncells=sapply(files,nrow)
+patients=names(files)
+```
+
+# Extract markers
+```{r}
+freqMarkers=table(unlist(markers))
+fullMarkers=names(freqMarkers)
+```
+
+# Check frequency of markers
+```{r}
+barplot(freqMarkers,ylab = "Frequency",las=2)
+```
+
+# Visualize patient-marker tradeoff
+```{r}
+freqs=100:(length(patients)-1)
+nmkr=integer()
+npts=integer()
+
+for (i in 1:length(freqs) ){
+nmkr[i]=length(fullMarkers[which(freqMarkers>freqs[i])])
+npts[i]=sum(sapply(markers,function(x){all(fullMarkers[which(freqMarkers>freqs[i])] %in% x)}))
+}
+
+npts=npts[c(1,which(diff(nmkr)!=0)+1)]
+freqs=freqs[c(1,which(diff(nmkr)!=0)+1)]
+nmkr=nmkr[c(1,which(diff(nmkr)!=0)+1)]
+
+plot(x=nmkr,y=npts,ylab="Number of patients",xlab="Number of markers",cex=5)
+text(x=nmkr,y=npts ,labels=freqs)
+
+```
+
+# Selection
+```{r}
+marker_selection=c("CD10","CD19","CD20","CD34","CD38","CD45","CD66","CD58", "FSC.A", "SSC.A")
+patient_selection=which(sapply(markers,function(x){all(marker_selection %in% x)}))
+```
+
+# Export 
+```{r}
+for (i in patient_selection){
+  ndata=nrow(files[[i]])
+  if(ndata>10000){ndata=10000}
+  dataf=as.data.frame(files[[i]]@exprs)
+  if (length(which(marker_selection%in%colnames(dataf)))==length(marker_selection)){
+  dataf=dataf[sample(nrow(dataf),ndata),marker_selection] # downsample
+  write.FCS(flowFrame(as.matrix(dataf)),paste0(destination,"/",patients[[i]],".fcs")) 
+  }
+}
+```
+
+
+
+

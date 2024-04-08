@@ -1,0 +1,54 @@
+---
+title: "Preprocess_FCSfiles"
+author: "Álvaro Martínez-Rubio"
+date: "01/04/2023"
+output: html_document
+---
+
+# Load Libraries and auxiliary programmes
+
+```{r}
+library(foreach)
+library(doParallel)
+source("Utilities/preprocess_patient.R")
+``` 
+
+# Output directory
+
+Create a folder to export the preprocessed FCS files
+
+```{r}
+destination="Preprocesssed"
+dir.create(destination)
+```
+
+# Import data
+
+The directory folder should contain one folder per patient. Each subfolder should contain the already filtered FCS files (without doublets, debris and other acquisition errors)
+
+```{r}
+directory="Filtered_FCS"
+patients=list.files(directory)
+```
+
+# Preprocess and export 
+
+```{r}
+# Create parallel 
+numCores = detectCores()
+registerDoParallel(numCores)
+  
+# Preprocess patients
+foreach(i=1:length(patients))%dopar%{
+  
+  dir.create(paste0(destination,"/",patients[i]),showWarnings = FALSE) # Create folder per patient
+  
+  preprocessed_files=preprocess_patient(paste0(directory,"/",patients[i])) # Preprocess
+  
+  for (j in 1:length(preprocessed_files)){ # write each preprocessed FCS file
+  write.FCS(preprocessed_files[[j]],paste0(destination,"/",patients[i],"/prepro_",names(preprocessed_files)[[j]])) 
+   }
+  
+}
+```
+

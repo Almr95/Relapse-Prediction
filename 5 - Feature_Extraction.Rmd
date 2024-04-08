@@ -1,0 +1,216 @@
+---
+title: "Feature Extraction"
+output: html_document
+date: "2022-12-10"
+---
+
+# Load Libraries and auxiliary programmes
+
+```{r}
+# Flow cytometry
+library(flowCore)
+library(flownalysis)
+library(FlowSOM)
+
+# Data manipulation
+library(reshape)
+library(dplyr)
+library(data.table)
+library(moments)
+
+# Plotting
+library(ggplot2)
+library(ggpubr)
+library(ggridges)
+library(scales)
+library(viridis)
+
+# Excel
+library(readxl)
+library(writexl)
+
+source("Utilities/extract_features.R")
+```
+
+# Output directory
+
+Create a folder to export the extracted features
+
+```{r}
+destination="Features"
+dir.create(destination)
+```
+
+# Select patients
+
+The directory folder should contain one FCS file per patient
+
+```{r}
+directory="Selected"
+patients=list.files(directory,pattern=".fcs")
+```
+
+# Load data
+
+```{r}
+fn=file.path(directory,patients)
+fs=read.flowSet(files=fn)
+markers=markernames(fs)
+```  
+
+# Load metadata
+
+```{r}
+database=read_excel("metadata.xlsx")
+patients=gsub(".fcs","",patients)
+metadata=data.frame(Patient=patients,Status=factor(database$RELAPSE[database$ID%in%patients]))
+levels(metadata$Status)=c("NR","R")
+```
+
+# Load clustering
+
+```{r}
+load("Visualization/fsom.Rdata")
+cluster=GetClusters(fSOM)
+metacluster=GetMetaclusters(fSOM)
+
+all=merge_flowSet(fs,rename.cols = F)
+all$exp=gsub(".fcs","",all$exp)
+```
+
+
+# Extract features
+
+## Abundance
+```{r}
+dir=paste0(destination,"/Abundance")
+dir.create(dir,showWarnings = FALSE)
+
+# For each patient, compute the proportion of their cells that belong to each cluster
+abundance=list()
+for (i in 1:length(fn)){
+ abundance[[i]]=as.integer(table(factor(cluster[which(all$exp==patients[i])],levels=1:length(unique(cluster)))))/nrow(fs[[i]])
+}
+Abundance=as.data.frame(do.call(rbind, abundance)) 
+colnames(Abundance)=1:max(cluster)
+Abundance$Status=metadata$Status
+rownames(Abundance)=patients
+
+write_xlsx(Abundance,paste0(dir,"/Values.xlsx"))
+```
+
+## Plots
+```{r}
+# Compute the proportion
+Abundance_freq=Abundance[,1:max(cluster)]*100
+
+# Compute KStest pvals and print barplot
+Kstest_p=apply(Abundance_freq, 2, function(x) ks.test(x[metadata$Status=="R"],x[metadata$Status=="NR"])$p)
+  
+pdf(paste0(dir,"/KStest_pvals.pdf"),width=50,height=5) 
+KS=data.frame(Pval=Kstest_p,Cluster=colnames(Abundance_freq))
+KS$Cluster=factor(KS$Cluster, levels = KS$Cluster)
+print(ggplot(KS,aes(Cluster,Pval))+geom_col(color="black")+geom_hline(yintercept=0.05, linetype="dashed", color = "red")+theme_bw()+theme(text = element_text(size = 20)))
+dev.off()
+
+# Boxplot (R vs NR)
+Abundance_freq$Status=Abundance$Status
+
+pdf(paste0(dir,"/Boxplot.pdf"),width=10,height=5)
+p1=ggplot(melt(data.table(Abundance_freq[,c(1:25,51)]),id="Status"), aes(x=factor(variable), y=value,color=Status))+geom_boxplot(outlier.colour = NULL)+ylab("")+xlab("")+theme_bw()+theme(legend.position = "top")+scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  scale_y_continuous(trans=asinh_trans())
+p2=ggplot(melt(data.table(Abundance_freq[,26:51]),id="Status"), aes(x=factor(variable), y=value,color=Status))+geom_boxplot(outlier.colour = NULL)+ylab("")+xlab("")+theme_bw()+theme(legend.position = "top")+scale_color_manual(values=c("#00BFC4","#F8766D"))+
+  scale_y_continuous(trans=asinh_trans())
+ggarrange(p1,p2,ncol=1,nrow=2)
+dev.off() 
+
+# Plot pvalue of ks test on flowsom
+pdf(paste0(dir,"/fSOM_pval.pdf"),width=7,height=5)
+PlotVariable(fSOM,variable=Kstest_p,colorPalette = viridis,lim = c(0,0.05),backgroundValues=fSOM$metaclustering,backgroundColor=colors)
+dev.off()
+
+# Plot cluster number
+pdf(paste0(dir,"/fSOM_num.pdf"),width=7,height=5)
+PlotNumbers(fSOM,backgroundValues=fSOM$metaclustering,backgroundColor=colors)
+dev.off()
+```
+
+
+## Abundance (only those with significant differences)
+```{r}
+sig=which(Kstest_p<0.05)
+
+if (length(sig)>0){
+    
+dir=paste0(destination,"/Abundance_sig")
+dir.create(dir,showWarnings = FALSE)
+
+Abundance_sig=Abundance[sig]
+
+Abundance_sig_freq=Abundance_sig*100
+  
+# Compute KStest pvals and print barplot
+Kstest_p=apply(Abundance_sig_freq, 2, function(x) ks.test(x[metadata$Status=="R"],x[metadata$Status=="NR"])$p)
+  
+pdf(paste0(dir,"/KStest_pvals.pdf"),width=50,height=5) 
+KS=data.frame(Pval=Kstest_p,Marker=colnames(Abundance_sig_freq))
+KS$Marker=factor(KS$Marker, levels = KS$Marker)
+print(ggplot(KS,aes(Marker,Pval))+geom_col(color="black")+geom_hline(yintercept=0.05, linetype="dashed", color = "red")+theme_bw()+theme(text = element_text(size = 20)))
+dev.off()
+
+Abundance_sig_freq$Status=Abundance$Status
+
+pdf(paste0(dir,"/Boxplot.pdf"),width=3,height=5)
+print(ggplot(melt(data.table(Abundance_sig_freq),id="Status"), aes(x=factor(variable), y=value,color=Status))+geom_boxplot(outlier.colour = NULL)+ylab("")+xlab("")+theme_bw()+theme(legend.position = "top")+scale_color_manual(values=c("#00BFC4","#F8766D"))+scale_y_continuous(trans=asinh_trans()))
+dev.off() 
+
+Abundance_sig$Status=Abundance$Status
+      
+write_xlsx(Abundance_sig,paste0(dir,"/Values.xlsx"))
+
+}
+
+```
+
+
+## Expression  (whole dataset)
+```{r}
+dir=paste0(destination,"/Full")
+dir.create(dir,showWarnings = FALSE)
+
+extract_features(fs,metadata,dir)
+```
+
+## Expression  (each metacluster)
+```{r}
+for (i in 1:length(levels(metacluster))){
+  
+  # Create folder
+  dir=paste0(destination,"/Meta_",i)
+  dir.create(dir,showWarnings = FALSE)
+  
+  # Get flowSet
+  idx=which(metacluster==i)
+  sub=all[idx,-ncol(all)]
+  sub_split=split(sub,all[idx,ncol(all)])
+  sub_split_ff=lapply(sub_split,function (x) flowFrame(as.matrix(x)))
+  sub_fs=flowSet(sub_split_ff)
+  
+  # Get metadata
+  sub_metadata=metadata[which(names(sub_fs@frames)%in%metadata$Patient),]
+  
+  # Extract features
+  extract_features(sub_fs,sub_metadata,dir)
+  
+}
+```
+
+
+
+
+
+
+
+
+
+

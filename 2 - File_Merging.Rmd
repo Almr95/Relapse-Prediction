@@ -1,0 +1,62 @@
+---
+title: "File_Merging"
+author: "Álvaro Martínez Rubio"
+date: "01/04/2024"
+output: html_document
+---
+
+# Load Libraries and auxiliary programmes
+
+```{r setup, include=FALSE}
+library(foreach)
+library(doParallel)
+
+source("Utilities/Merge_Basic.R")
+source("Utilities/Merge_Cycombine.R")
+source("Utilities/Merge_CytoBackBone.R")
+source("Utilities/Merge_CYTOFmerge.R")
+```
+
+# Output directory
+
+Create a folder to export the merged FCS file
+
+```{r}
+destination="Merged"
+dir.create(destination)
+```
+
+# Import data
+
+The directory folder should contain one folder per patient. Each subfolder should contain the preprocessed FCS files
+
+```{r}
+directory="Preprocessed"
+patients=list.files(directory)
+```
+
+
+# Merge and save
+```{r}
+# Create parallel
+numCores = detectCores()
+registerDoParallel(numCores)
+
+# Merge patients
+Time=foreach(i=1:length(patients))%dopar%{
+  
+  # Merge
+  merged_patient=Merge_CytoBackBone(paste0(directory,"/",patients[i]))
+  
+  # Export
+  write.FCS(merged_patient,paste0(destination,"/",patients[i],".fcs")) 
+
+}
+```
+
+
+
+
+
+
+
