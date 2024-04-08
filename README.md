@@ -32,4 +32,4 @@ The starting point is a database of patients for which we have flow cytometry da
 
 Along with the codes that perform each of this steps (in R markdown), we provide additional R code containing auxiliary code and subroutines. 
 
-The data employed for the study cited at the beginning of this file is available at FLOW REPOSITORY. The selection of patients used for most of the results are also available here, in the Selection subfolder, along with an excel file containing the outcome annotation. These have already been manually filtered, computationally preprocessed, merged and subsampled. 
+The data employed for the study cited at the beginning of this file is available at http://flowrepository.org/id/FR-FCM-Z7A2. The selection of patients used for most of the results are also available here, in the Selection subfolder, along with an excel file containing the outcome annotation. These have already been manually filtered, computationally preprocessed, merged and subsampled. 
