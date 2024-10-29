@@ -1,0 +1,209 @@
+---
+title: "Patient_Selection"
+author: "Álvaro Martínez Rubio"
+date: "28/10/2024"
+output: html_document
+---
+
+# Load Libraries 
+
+```{r}
+library(flowCore)
+library(data.table)
+library(ggplot2)
+library(readxl)
+```
+
+# Output directory
+
+Create a folder to export the merged FCS files of the selected patients
+
+```{r}
+destination="Selected"
+dir.create(destination)
+```
+
+# Input directory
+
+The directory folder should contain one FCS file per patient
+
+```{r}
+directory="Merged"
+patients=list.files(directory)
+```
+
+# Load metadata
+
+Mainly for tracking relapse status
+
+```{r}
+database=read_excel("metadata.xlsx")
+patients=gsub(".fcs","",patients)
+metadata=data.frame(Patient=patients,Status=factor(database$RELAPSE[database$ID%in%patients]))
+levels(metadata$Status)=c("NR","R")
+```
+
+# Import files
+```{r}
+patients=paste0(patients,".fcs")
+files=list()
+for (i in 1:length(patients)){
+  files[[i]]=read.FCS(paste0(directory,"/",patients[[i]]))
+}
+names(files)=patients
+```
+
+# Visualize markers per patient (table)
+
+```{r}
+markers_list=lapply(files,function(x){unname(x@parameters@data$name)})
+
+# Get the unique list of all possible markers
+all_markers = unique(unlist(markers_list))
+
+# Create a matrix to store the presence of markers for each patient
+patient_marker_matrix = matrix(0, nrow = length(markers_list), ncol = length(all_markers))
+
+# Assign row and column names
+rownames(patient_marker_matrix) = gsub(".fcs","",patients)
+colnames(patient_marker_matrix) = all_markers
+
+# Fill the matrix: 1 if marker is present for a patient, otherwise 0
+for (i in 1:length(markers_list)) {
+  patient_marker_matrix[i, all_markers %in% markers_list[[i]]] = 1
+}
+
+# Convert the matrix to a data frame for plotting
+patient_marker_df = as.data.frame(patient_marker_matrix)
+patient_marker_df$Patient = rownames(patient_marker_df)
+
+# Melt the data for ggplot
+melted_df = melt(patient_marker_df, id.vars = "Patient", variable.name = "Marker", value.name = "Presence")
+```
+
+```{r}
+# Split data according to hospital
+subset_hva_hvr = melted_df[grepl("HVA|HVR", melted_df$Patient), ]
+subset_other = melted_df[!grepl("HVA|HVR", melted_df$Patient), ]
+
+# Plot HVA and HVR
+pdf(paste0(destination, "/mkrpts_HVA_HVR.pdf"), width=10, height=15)
+ggplot(subset_hva_hvr, aes(x = Marker, y = Patient, fill = as.factor(Presence))) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("0" = "white", "1" = "black")) +
+  theme_bw() +
+  labs(x = "Marker", y = "Patient") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(legend.position = "none")
+dev.off()
+
+# Plot HNJ
+pdf(paste0(destination, "/mkrpts_HNJ.pdf"), width=10, height=15)
+ggplot(subset_other, aes(x = Marker, y = Patient, fill = as.factor(Presence))) +
+  geom_tile(color = "white") +
+  scale_fill_manual(values = c("0" = "white", "1" = "black")) +
+  theme_bw() +
+  labs(x = "Marker", y = "Patient") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  theme(legend.position = "none")
+dev.off()
+```
+
+
+# Remove patients with less than 10000 cells
+```{r}
+files[which(sapply(files,nrow)<10000)]=NULL
+
+# Recompute markers, number of cells and patient IDs
+markers=lapply(files,function(x){unname(x@parameters@data$name)})
+ncells=sapply(files,nrow)
+patients=names(files)
+```
+
+# Extract markers
+```{r}
+# frequency
+freqMarkers=table(unlist(markers))
+
+# list
+fullMarkers=names(freqMarkers)
+```
+
+# Visualize
+```{r}
+# Put names and frequencies into dataframe for ggplot
+data = data.frame(Marker = names(freqMarkers),Frequency = as.numeric(freqMarkers))
+
+# Retain only markers that are present in more than 100 patients
+filtered_data = data[data$Frequency > 100, ]
+
+# Barplot
+pdf(paste0(destination,"/freq.pdf"),width=6,height=4.2)
+ggplot(filtered_data, aes(x = Marker, y = Frequency)) +
+  geom_bar(stat = "identity",fill="darkgray") +
+  labs(x = "Marker", y = "Number of patients") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size=10,angle = 90, hjust = 1, vjust=0.5, color = "black"),
+    axis.text.y = element_text(size=15, color = "black"),
+    axis.title = element_text(size=15,color="black")
+  )
+dev.off()
+```
+
+# Visualize patient-marker tradeoff
+```{r}
+# List of frequencies to assess
+freqs=100:(length(patients)-1)
+
+# Initialize
+nmkr=integer()
+mkr_selection=list()
+npts=integer()
+pts_selection=list()
+
+for (i in 1:length(freqs) ){
+mkr_selection[[i]]=names(which(freqMarkers>freqs[i])) # Find which markers are present in more than freqs[i] patients
+nmkr[i]=length(mkr_selection[[i]]) # count them
+pts_selection[[i]]=which(sapply(markers,function(x){all(mkr_selection[[i]] %in% x)})) # find which patients have ALL those markers
+npts[i]=length(pts_selection[[i]]) # count them
+}
+
+# Put into dataframe for ggplot
+df=data.frame(markers=nmkr,patients=npts)
+
+# Plot
+pdf(paste0(destination,"/tradeoff.pdf"),width=4,height=4)
+ggplot(df,aes(markers,patients))+geom_line(linewidth=2,color="darkgray")+theme_bw()+xlab("Number of markers")+ylab("Number of patients")+theme(axis.text = element_text(size=15,color="black"),axis.title = element_text(size=15,color="black"))
+dev.off()
+```
+
+# Selection
+```{r}
+# Specify final selection (number of markers)
+number_selection=10
+
+# Subset
+marker_selection=mkr_selection[[max(which(nmkr==number_selection))]]
+patient_selection=which(sapply(markers,function(x){all(marker_selection %in% x)}))
+```
+
+# Export 
+```{r}
+for (i in patient_selection){
+  
+  # Export 10000 cells per patient
+  ndata=nrow(files[[i]])
+  if(ndata>10000){ndata=10000}
+  dataf=as.data.frame(files[[i]]@exprs)
+  
+  if (length(which(marker_selection%in%colnames(dataf)))==length(marker_selection)){
+    dataf=dataf[sample(nrow(dataf),ndata),marker_selection] # downsample
+    write.FCS(flowFrame(as.matrix(dataf)),paste0(destination,"/",patients[[i]],".fcs")) 
+  }
+}
+```
+
+
+
+

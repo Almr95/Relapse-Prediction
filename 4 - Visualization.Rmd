@@ -1,0 +1,411 @@
+---
+title: "Visualization"
+author: "Álvaro Martínez Rubio"
+date: "01/04/2024"
+output: html_document
+---
+
+# Load Libraries and auxiliary programmes
+
+```{r}
+# Flow cytometry
+library(flowCore)
+library(FlowSOM)
+library(ConsensusClusterPlus)
+
+# Data manipulation
+library(reshape2)
+library(dplyr)
+library(plyr)
+library(ks)
+library(uwot)
+library(data.table)
+library(clue)
+
+# Plotting
+library(ggplot2)
+library(ggcyto)
+library(ggpubr)
+library(viridis)
+library(ggridges)
+library(gridExtra)
+library(RColorBrewer)
+
+# Parallel
+library(foreach)
+library(doParallel)
+
+# Excel
+library(readxl)
+library(writexl)
+```
+
+# Output directory
+
+Create a folder to export the visualization results
+
+```{r}
+destination="Visualization"
+dir.create(destination)
+```
+
+# Select patients
+
+The directory folder should contain one FCS file per patient
+
+```{r}
+directory="Selected"
+patients=list.files(directory,pattern=".fcs")
+```
+
+# Load data
+
+```{r}
+fn=file.path(directory,patients)
+fs=read.flowSet(files=fn)
+markers=markernames(fs)
+```  
+
+# Load metadata
+
+```{r}
+database=read_excel("metadata.xlsx")
+patients=gsub(".fcs","",patients)
+metadata=data.frame(Patient=patients,Status=factor(database$RELAPSE[database$ID%in%patients]))
+levels(metadata$Status)=c("NR","R")
+```
+
+# Diagnostic plots
+
+Visualize all markers versus side scatter
+
+```{r}
+for (i in 1:length(markers)){
+pdf(paste0(destination,"/Diagnostic_",markers[i],".pdf"),width=20,height=22)
+print(ggcyto(fs,aes_string(markers[i],"SSC.A"))+geom_hex(bins = 300)+ggcyto_par_set(limits = list(x = c(-0.2,1.2), y= c(-0.2,1.2))))
+dev.off()
+}
+```
+
+# FlowSOM
+
+Concatenate all patients
+
+```{r}
+all=ldply(fsApply(fs, function(x) as.data.frame(exprs(x)), simplify = FALSE),.id = "exp")
+all$exp=gsub(".fcs","",all$exp)
+all_ff=flowFrame(as.matrix(all[,markers]))
+```
+
+Cluster with flowSOM + consensuscluster. Find optimal number of clusters with PAC and area under delta curve. Put all of this in a function and repeat to get estimation of variance.
+
+```{r}
+# Function to perform clustering and compute deltaK and PAC
+perform_clustering = function(fsom, clus_markers, maxK = 20, reps = 300, pItem = 0.9, pFeature = 1, breaks = 100, x1 = 0.1, x2 = 0.9) {
+  
+  # Compute Self-Organizing Map
+  som = BuildSOM(fsom, colsToUse = which(markers %in% clus_markers), silent = TRUE, xdim = 10, ydim = 5)
+  
+  # Compute metaclusters
+  mc = suppressWarnings(suppressMessages(ConsensusClusterPlus(t(som$map$codes), maxK = maxK, reps = reps, pItem = pItem, pFeature = pFeature,title = destination, plot = "pdf", verbose = FALSE,clusterAlg = "hc", distance = "euclidean", innerLinkage = "complete")))
+  
+  # vector with numbers of metaclusters
+  Kvec = 2:maxK
+  
+  # initialize
+  PAC = rep(NA, length(Kvec))
+  names(PAC) = paste("K=", Kvec, sep = "")
+  areaK = c()
+  
+  # for each metaclustering result
+  for (i in Kvec) {
+    # extract consensus matrix
+    M = mc[[i]]$consensusMatrix
+    
+    # Compute proportion of ambiguously clustered pairs (PAC)
+    Fn = ecdf(M[lower.tri(M)])
+    PAC[i - 1] = Fn(x2) - Fn(x1)
+    
+    # Compute area under the CDF (histogram method)
+    h = hist(M, plot = FALSE, breaks = seq(0, 1, by = 1 / breaks))
+    h$counts = cumsum(h$counts) / sum(h$counts)
+    thisArea = 0 # initialize
+    for (bi in 1:(length(h$breaks) - 1)) {
+      thisArea = thisArea + h$counts[bi] * (h$breaks[bi + 1] - h$breaks[bi])
+      bi = bi + 1
+    }
+    areaK = c(areaK, thisArea)
+  }
+  
+  # Compute change in AUC
+  deltaK = areaK[1] # initial auc at k=2
+  for (i in 2:(length(areaK))) {
+    deltaK = c(deltaK, (areaK[i] - areaK[i - 1]) / areaK[i - 1])
+  }
+  
+  # Put everything into dataframe
+  data.frame(Kvec = Kvec, PAC = PAC, deltaAUC = deltaK)
+}
+
+# Number of iterations
+iterations = 100
+
+# Clustering markers
+clus_markers=c("CD45","CD10","CD34","CD19","CD20","CD38","CD58","CD66")
+
+# Read data into FlowSOM
+fsom = ReadInput(all_ff,transform = FALSE,compensate = FALSE,scale = FALSE)
+
+# Register parallel backend
+cl = makeCluster(detectCores())
+registerDoParallel(cl)
+
+# Apply function
+results_list = foreach(i = 1:iterations,.packages = c('FlowSOM','ConsensusClusterPlus')) %dopar% {
+  perform_clustering(fsom, clus_markers)
+}
+
+# Stop the cluster after the task is complete
+stopCluster(cl)
+
+# Combine results into one data frame
+results = rbindlist(results_list, idcol = "iteration")
+
+# Summarize
+summary_results = results[, .(mean_PAC = mean(PAC, na.rm = TRUE), sd_PAC = sd(PAC, na.rm = TRUE), 
+                               mean_deltaAUC = mean(deltaAUC, na.rm = TRUE), sd_deltaAUC = sd(deltaAUC, na.rm = TRUE)), by = Kvec]
+
+# Export
+write_xlsx(results,path=paste0(destination,"/Clustering.xlsx"))
+```
+
+Plot
+
+```{r}
+# Plot results with error bars
+pdf(paste0(destination,"/Elbow.pdf"),width=4,height=4)
+ggplot(summary_results, aes(x = Kvec)) +
+  geom_point(aes(y = mean_PAC, color = "PAC"),size=3) +
+  geom_line(aes(y = mean_PAC, color = "PAC"),linewidth=1) +
+  geom_errorbar(aes(ymin = mean_PAC - sd_PAC, ymax = mean_PAC + sd_PAC, color = "PAC"), width=0.5,linewidth=1) +
+  geom_point(aes(y = mean_deltaAUC, color = "deltaAUC"),size=3) +
+  geom_line(aes(y = mean_deltaAUC, color = "deltaAUC"),linewidth=1) +
+  geom_errorbar(aes(ymin = mean_deltaAUC - sd_deltaAUC, ymax = mean_deltaAUC + sd_deltaAUC, color = "deltaAUC"), width = 0.5,linewidth=1) +
+  scale_color_manual(name = "Metric", values = c("PAC" = "#628dbd", "deltaAUC" = "#fa8072"),labels=c("AUC","PAC")) +
+  ylab("Value")+xlab("Number of Metaclusters")+theme_bw()+theme(legend.position =c(.75,.75),axis.text = element_text(size=15,color="black"),axis.title = element_text(size=15),legend.text = element_text(size=15),legend.title = element_blank())
+dev.off()
+```
+
+Tough call. There is a clear k=5 according to AUC. Another at k=8 according to both. A final one at k=15, both again. So if we use both we can argue 8 and 15. (weak)
+
+Metacluster ID may be too specific of one flowSOM run. Let's complicate this by running flowSOM several times and matching metacluster ID by means of consensus clustering in package 'clue'
+
+After deciding optimal number of metaclusters, obtain final metacluster assignment by aggregating results from 50 new runs of FlowSOM 
+
+
+```{r}
+# Number of iterations and clusters
+iterations = 50
+num_clusters = 9
+clus_markers=c("CD45","CD10","CD34","CD19","CD20","CD38","CD58","CD66")
+
+# Store metacluster assignments from each iteration
+metacluster_assignments = matrix(NA, nrow = nrow(all_ff@exprs), ncol = iterations)
+
+# Read data into FlowSOM
+fsom = ReadInput(all_ff,transform = FALSE,compensate = FALSE,scale = FALSE)
+
+# Number of cores to use
+num_cores = detectCores() - 1
+
+# Create a parallel backend
+cl = makeCluster(num_cores)
+registerDoParallel(cl)
+
+# Run FlowSOM multiple times and store results in parallel
+results = foreach(i = 1:iterations, .combine = cbind, .packages = 'FlowSOM') %dopar% {
+  
+  # SOM
+  fsom = BuildSOM(fsom, colsToUse = which(markers %in% clus_markers), silent = TRUE, xdim = 10, ydim = 5)
+  
+  # Metacluster
+  metaClustering = as.character(metaClustering_consensus(fsom$map$codes, k = num_clusters))
+  
+  # Get metacluster assignments
+  GetMetaclusters(fsom, metaClustering)
+}
+
+# Stop the cluster
+stopCluster(cl)
+
+# Combine results
+metacluster_assignments = matrix(results, nrow = nrow(all_ff@exprs), ncol = iterations)
+
+# Use consensus clustering from clue package
+metacluster_assignment_clue=lapply(as.list(data.frame(metacluster_assignments)),as.cl_hard_partition)
+final_consensus=cl_consensus(metacluster_assignment_clue,method = "HE",control=list(nruns=1))
+final_consensus_ids=as.integer(cl_class_ids(final_consensus))
+
+# Save data
+mc_IDs=as.data.frame(metacluster_assignments)
+save(mc_IDs,file=paste0(destination,"/mc_IDs.RData"))
+save(final_consensus_ids,file=paste0(destination,"/consensus_IDs.RData"))
+```
+
+
+
+# UMAP 
+
+Dimensionality reduction
+
+```{r}
+# Bind data with metacluster ID
+all_mc=cbind(all,final_consensus_ids) 
+
+# sample for UMAP visualization
+sample_ids=sample(1:nrow(all_mc),1000*length(unique(all_mc$exp))) 
+all_mc_ds=all_mc[sample_ids,] 
+
+# UMAP (uwot)
+fs_umap=umap(all_mc_ds[,which(colnames(all_mc_ds)%in%clus_markers)],ret_model = TRUE,min_dist = 0.01,n_neighbors = 15)
+
+# Store in dataframe
+umap_coord=as.data.frame(fs_umap$embedding)
+colnames(umap_coord)=c("UMAP1","UMAP2")
+umap_res=cbind(umap_coord,all_mc_ds)
+
+# Save results
+save(umap_res,file=paste0(destination,"/UMAP.RData"))
+umap_file=tempfile("fs_umap")
+save_uwot(fs_umap,file=umap_file)
+save(fs_umap,file=paste0(destination,"/UMAP_model.RData"))
+```
+
+# Plot UMAP with flowSOM metacluster
+
+Color each cell according to metacluster ID
+
+```{r}
+colors = c('#8dd3c7', '#ffffb3', '#bebada', '#fb8072', '#80b1d3','#fdb462', '#b3de69', '#fccde5', '#d9d9d9','#bc80bd','#ffed6f', '#ff9d00', '#b2e2ff', '#c6d8d0', '#d0a6f0')
+pdf(paste0(destination,"/UMAP_mc_robust_consensus.pdf"),width=5,height=5)
+print(ggplot(umap_res,aes(UMAP1,UMAP2,color=as.factor(final_consensus_ids)))+geom_point(size=1)+theme_void()+rremove("grid")+rremove("ticks")+rremove("axis.title")+rremove("axis.text")+theme(legend.position = "none")+scale_color_manual(values=colors))
+dev.off()
+```
+
+
+# Plot all runs of flowSOM on umap
+
+This is for understanding how consensus select the optimal number of clusters
+
+```{r}
+plt=list()
+
+for (j in 1:50){
+plt[[j]]=ggplot(umap_res,aes_string("UMAP1","UMAP2",color=as.factor(metacluster_assignments[sample_ids,j])))+geom_point(size=1)+theme_void()+rremove("grid")+rremove("ticks")+rremove("axis.title")+rremove("axis.text")+theme(legend.position = "none")+scale_color_manual(values=colors)
+}
+
+png(paste0(destination,"/UMAP_mc_all.png"),width=35,height=50,units="cm",res=300)
+ggarrange(plotlist=plt,nrow=9,ncol=6)
+dev.off()
+```
+
+# Plot each marker on UMAP embedding
+
+```{r}
+plt=list()
+
+for (j in 1:length(markers)){
+  plt[[j]]=ggplot(umap_res,aes_string(x="UMAP1",y="UMAP2",color=markers[j]))+geom_point(size=1)+theme_bw()+scale_color_viridis_c(limits = c(-0.2, 1.2),oob = scales::squish,breaks=c(0,0.5,1),labels=c(0,0.5,1))+rremove("grid")+rremove("ticks")+rremove("axis.title")+rremove("axis.text")+ggtitle(markers[j])+theme(panel.border = element_blank(),legend.title = element_blank())+theme(legend.position="none",plot.title = element_text(size=22,face="bold"))
+}
+
+png(paste0(destination,"/UMAP_mkrs.png"),width=20,height=22,units="cm",res=300)
+ggarrange(plotlist = plt,nrow=4,ncol=4)
+dev.off()
+```
+
+# Legend
+
+Separated for improved visualization
+
+```{r}
+p=ggplot(umap_res,aes_string(x="UMAP1",y="UMAP2",color=markers[j]))+geom_point(size=1)+theme_bw()+scale_color_viridis_c(limits = c(-0.2, 1.2),oob = scales::squish,breaks=c(0,0.5,1),labels=c(0,0.5,1))+theme(legend.title = element_blank(),legend.position = "bottom")
+leg=get_legend(p)
+pdf(paste0(destination,"/UMAP_leg.pdf"),width=4,height=1)
+as_ggplot(leg)
+dev.off()
+```
+
+# Plot number of patients per metacluster
+
+```{r}
+# Get unique patients per cluster and merge with metadata to get patient status
+patient_cluster_status = all_mc %>%
+  distinct(exp, final_consensus_ids) %>%
+  inner_join(metadata, by = c("exp" = "Patient"))
+
+pdf(paste0(destination,"/mc_patients.pdf"),width=6.5,height=6.5)
+ggplot(patient_cluster_status, aes(x = as.factor(final_consensus_ids), fill = Status)) +
+  geom_bar() +
+  geom_hline(yintercept = nrow(metadata), linetype = "dashed", color = "black") +
+  labs(x = "Metacluster",
+       y = "Patients") + 
+  scale_fill_manual(values=c("#00BFC4","#F8766D"))+
+  theme_bw()+theme(legend.position = "none",text=element_text(size=30),axis.text.x=element_text(size=20))
+dev.off()
+```
+
+
+
+# Visualize marker intensity distributions
+
+```{r}
+# add Status information
+all_mc$Status=metadata$Status[match(all_mc$exp,metadata$Patient)]
+
+# For each metacluster
+for (mc in 1:9){
+  
+# Filter for each metacluster
+all_mc_filtered = all_mc[all_mc$cluster %in% mc, ]
+  
+# Melt the dataframe for plotting
+meltdf = melt(data.table(all_mc_filtered), id.vars = c("exp", "Status", "final_consensus_ids"))
+meltdf$cluster = factor(meltdf$cluster, levels = mc, ordered = TRUE)
+
+# Plot aggregated distributions
+p1 = ggplot(meltdf, aes(x = value, y = final_consensus_ids, fill = Status)) +
+    facet_wrap(~variable, scales = "free_x", nrow = 1) + 
+    geom_density_ridges(alpha = 0.6) + 
+    scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+    theme_ridges() + 
+    theme(
+      legend.position = "none",
+      strip.background = element_blank(),
+      strip.text = element_text(face = "bold", size = 20),
+      axis.text.x = element_text(size=15)
+    ) + xlim(c(-0.2, 1.2))
+  
+# Plot segregated by patient
+p2 = ggplot(meltdf, aes(x = value, y = final_consensus_ids, fill = Status)) +
+    facet_wrap(~variable, scales = "free_x", nrow = 1) + 
+    geom_density_ridges(alpha = 0.3, color = "black", aes(group = exp)) +  # Black lines for each patient
+    scale_fill_manual(values = c("#00BFC4", "#F8766D")) +
+    theme_ridges() + 
+    theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      legend.position = "none",
+      axis.text.x = element_text(size=15)
+    ) + xlim(c(-0.2, 1.2))
+  
+pdf(paste0(destination, "/single_clus_exp_",mc_selection,".pdf"), width = 20, height = 5)
+print(gridExtra::grid.arrange(p1, p2, nrow = 2))
+dev.off()
+}
+```
+
+
+
+
+
+

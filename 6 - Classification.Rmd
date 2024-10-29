@@ -1,0 +1,171 @@
+---
+title: "Classification"
+author: "Álvaro Martínez Rubio"
+date: "2023-02-06"
+output: html_document
+---
+
+# Load Libraries and auxiliary programmes
+
+```{r}
+# Parallel computing
+library(doParallel)
+library(foreach)
+
+# Plotting
+library(ggplot2)
+library(ggpubr)
+library(viridis)
+
+# Data manipulation
+library(dplyr)
+
+# Data Analysis
+library(Hmisc)
+library(caret)
+library(rsample)
+
+# Other
+library(stringr)
+library(entropy)
+
+# Excel
+library(readxl)
+library(writexl)
+
+source("Utilities/classification.R")
+```
+
+
+# Load features
+
+Specify the directory containing the feature extraction results
+
+```{r}
+directory="Features"
+dirs=list.files(directory,pattern="Values",recursive=TRUE,full.names = TRUE)
+dirs=gsub("/Values.xlsx","",dirs)
+```
+
+
+# Classification 
+
+```{r}
+for (i in 1:length(dirs)){
+results=classification(dirs[i])
+save(results,file=paste0(dirs[i],"/results.Rdata"))
+}
+```
+
+
+# Summarize results 
+
+```{r}
+# Initialze
+res=data.frame()
+
+# Get directories with metacluster information
+dirs_meta=dirs[which(sapply(dirs,function(x){grepl("Meta",x,fixed="TRUE")}))]
+
+for (i in 1:length(dirs_meta)){
+  
+  load(paste0(dirs_meta[i],"/results.Rdata"))
+  
+  if (length(results)!=0){
+  
+  # Get AUC
+  AUC=mean(results[[1]]$AUC)
+  
+  # Get Stability
+  Stability=max(table(results[[1]]$Model))/sum(table(results[[1]]$Model))
+  Stability_min=max(diff(round(seq(0, sum(table(results[[1]]$Model)), length.out=1+length(table(results[[1]]$Model))))))/sum(table(results[[1]]$Model))
+  Stability_norm=(Stability-Stability_min)/(1-Stability_min)
+  
+  # Get Metacluster
+  Meta=as.integer(substring(dirs_meta[i],str_locate(dirs_meta[i],"Meta_")[1,2]+1,str_locate_all(dirs_meta[i],"/")[[1]][nrow(str_locate_all(dirs_meta[i],"/")[[1]]),1]-1))
+  
+  # Get metric
+  Metric=substring(dirs_meta[i],str_locate_all(dirs_meta[i],"/")[[1]][nrow(str_locate_all(dirs_meta[i],"/")[[1]]),1]+1,nchar(dirs_meta[i]))
+  
+  # Group
+  res=rbind(res,data.frame(AUC=AUC,Stability=Stability_norm,Meta=Meta,Metric=Metric))
+  
+  }
+  
+}
+
+res$Meta=as.numeric(res$Meta)
+res=res[order(res$Meta),]
+
+# repeat for full dataset (irrespective of metacluster)
+
+dirs_full=dirs[which(sapply(dirs,function(x){grepl("Full",x,fixed="TRUE")}))]
+
+for (i in 1:length(dirs_full)){
+  
+  load(paste0(dirs_full[i],"/results.Rdata"))
+  
+  if (length(results)!=0){
+
+  # Get AUC      
+  AUC=mean(results[[1]]$AUC)
+  
+  # Get Stability
+  Stability=max(table(results[[1]]$Model))/sum(table(results[[1]]$Model))
+  Stability_min=max(diff(round(seq(0, sum(table(results[[1]]$Model)), length.out=1+length(table(results[[1]]$Model))))))/sum(table(results[[1]]$Model))
+  Stability_norm=(Stability-Stability_min)/(1-Stability_min)
+
+  # Full
+  Meta="Full"
+  
+  # Get metric
+  Metric=substring(dirs_full[i],str_locate_all(dirs_full[i],"/")[[1]][nrow(str_locate_all(dirs_full[i],"/")[[1]]),1]+1,nchar(dirs_full[i]))
+  
+  # Group
+  res=rbind(res,data.frame(AUC=AUC,Stability=Stability_norm,Meta=Meta,Metric=Metric))
+  
+  }
+  
+}
+
+res$Meta=factor(res$Meta,levels=c(as.character(1:max(as.numeric(res$Meta),na.rm=TRUE)),"Full"))
+
+# Rename metrics
+metrics = c(All="All", Median="Median",Order_1="Mean", Order_2="Std", Order_3="Skew", Order_4="Kurt")
+res$Metric = factor(metrics[res$Metric],levels=c("All","Median","Mean","Std","Skew","Kurt"))
+
+# save summary
+write_xlsx(res,paste0(directory,"/summary.xlsx"))
+```
+
+# Plots
+
+
+## Average precision (AUCPR) per metacluster
+```{r}
+colors <- c('#8dd3c7', '#ffffb3', '#bebada', '#fb8072', '#80b1d3','#fdb462', '#b3de69', '#fccde5', '#d9d9d9','#bc80bd','#ffed6f', '#ff9d00', '#b2e2ff', '#c6d8d0', '#d0a6f0')
+colors=c(colors[1:(max(as.integer(res$Meta))-1)],"black")
+
+
+png(paste0(directory,"/Results_all.png"),width=20,height=10,unit="cm",res=500)
+ggplot(res,aes(Meta,AUC,shape=Metric))+geom_hline(yintercept=0.202,linewidth=1,linetype="dashed")+geom_point(size=5,stroke=2,aes(color=Meta))+scale_shape_manual(values=c(19,8,1,2,5,6,11,8))+theme_bw()+scale_color_manual(values=colors,guide="none")+theme(text=element_text(size=20))+xlab("Metacluster")+ylab("Average Precision")+ylim(0,1)
+dev.off()
+```
+
+
+## Stability-AUC plot (individual moments)
+```{r}
+png(paste0(directory,"/Results_stability.png"),width=20,height=15,unit="cm",res=500)
+ggplot(res,aes(Stability,AUC))+geom_hline(yintercept=0.2,linewidth=1,linetype="dotted")+geom_point(size=4,aes(color=as.factor(Meta),shape=as.factor(Metric)),stroke=2)+theme_bw()+labs(shape="Metric",color="Metacluster")+xlim(c(0,1))+ylim(c(0,1))+theme(text=element_text(size=20))+scale_shape_manual(values=c(19,8,1,2,5,6,11,8))+xlab("Stability")+ylab("Area under PR curve")+scale_color_manual(values=colors)+guides(color=guide_legend(ncol=2))
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
