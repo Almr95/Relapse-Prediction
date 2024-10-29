@@ -1,0 +1,324 @@
+---
+title: "Merge Quality"
+author: "Álvaro Martínez Rubio"
+date: "2023-07-05"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(readxl)
+library(data.table)
+library(ggsci)
+library(ggpubr)
+library(scales)
+library(flowCore)
+library(viridis)
+library(writexl)
+library(foreach)
+library(doParallel)
+
+source("EMD_fcs.R")
+```
+
+# Select patients before merging
+
+```{r}
+directory_pre="Preprocessed"
+patients_pre=list.files(directory_pre)
+```
+
+# Select merged patients
+```{r}
+directory_basic="Merged_basic"
+directory_cycombine="Merged_cycombine"
+directory_cytobb="Merged_cytobb"
+directory_cytofmerge="Merged_cytofmerge"
+```
+
+# Read files for each patient and compute EMD
+
+```{r}
+EMDs=foreach(i=1:length(patients_pre))%dopar%{
+  EMD_basic=EMD_fcs(paste0(directory_pre,"/",patients_pre[i]),paste0(directory_basic,"/",patients_pre[i],".fcs"))
+  EMD_cycombine=EMD_fcs(paste0(directory_pre,"/",patients_pre[i]),paste0(directory_cycombine,"/",patients_pre[i],".fcs"))
+  EMD_cytobb=EMD_fcs(paste0(directory_pre,"/",patients_pre[i]),paste0(directory_cytobb,"/",patients_pre[i],".fcs"))
+  EMD_cytofmerge=EMD_fcs(paste0(directory_pre,"/",patients_pre[i]),paste0(directory_cytofmerge,"/",patients_pre[i],".fcs"))
+  EMDs=rbindlist(list(basic=EMD_basic,cycombine=EMD_cycombine,cytobb=EMD_cytobb,cytofmerge=EMD_cytofmerge),idcol="method")
+}
+names(EMDs)=patients_pre
+```
+
+# Prepare data for visualization
+
+```{r}
+# Bind
+EMD=rbindlist(EMDs,fill=TRUE,idcol="Patient")
+
+# Select only markers that are present in more than 50% of patients
+EMD_filtered = EMD[, colSums(is.na(EMD)) / nrow(EMD) < 0.5]
+
+# Remove backbone markers
+EMD_filtered = EMD_filtered[, !(colnames(EMD_filtered) %in% c("CD19", "CD45", "CD34"))]
+
+# Melt
+meltData=melt(EMD_filtered,id=c("method","Patient","Cells_pre","Cells_post","Time"))
+```
+
+# Boxplot of each marker, each method, log scale
+
+```{r}
+colors=c("#E48440","#459AB0","#DA3831","#634B8E")
+
+meltData$method=factor(meltData$method,levels=c("basic","cytofmerge","cytobb","cycombine"))
+
+meltData_edit = na.omit(replace(meltData, meltData == 0, 1e-6))
+
+p1=ggplot(meltData_edit[1:(0.5*nrow(meltData_edit)),], aes(x=variable, y=value,fill=method))+geom_boxplot()+ylab(paste0("EMD"))+theme_bw()+xlab("")+ guides(fill=guide_legend(title="Method"))+theme(legend.position = "none",axis.text = element_text(color="black",size=11))+
+  scale_y_log10(limits=c(1e-3,5),labels = trans_format("log10", math_format(10^.x)))+scale_fill_manual(values = colors)
+
+p2=ggplot(meltData_edit[(0.5*nrow(meltData_edit)+1):nrow(meltData_edit),], aes(x=variable, y=value,fill=method))+geom_boxplot()+ylab(paste0("EMD"))+theme_bw()+xlab("")+guides(fill=guide_legend(title="Method"))+theme(legend.position = "none",axis.text = element_text(color="black",size=11))+
+  scale_y_log10(limits=c(1e-3,5),labels = trans_format("log10", math_format(10^.x)))+scale_fill_manual(values = colors)
+
+# Arrange and export
+pdf("/Users/alvaromartinezrubio/Desktop/Merging_quality_log.pdf",width=8,height=4)
+ggarrange(p1, p2, nrow = 2)
+dev.off()
+```
+
+
+# Visual comprobation
+
+Show the difference between the original and the four imputations, for all imputed markers
+
+```{r}
+
+for (pt in patients_pre){
+
+  # Read files without merging
+  filenames=list.files(paste0(directory_pre,"/",pt),pattern = ".fcs",full.names = TRUE)
+  files=list()
+  for (i in 1:length(filenames)){
+    # Read FCS
+    data=read.FCS(filenames[i],truncate_max_range = FALSE,column.pattern = "Time",invert.pattern = TRUE) # Read
+    files[[i]]=as.data.frame(data@exprs)
+  }
+  markers=lapply(files,colnames)
+  Original=rbindlist(files,fill=TRUE)
+  
+  # Read merged files
+  Merged_basic=read.FCS(paste0(directory_basic,"/",pt,".fcs"))
+  Merged_basic=as.data.frame(Merged_basic@exprs)
+  
+  Merged_cycombine=read.FCS(paste0(directory_cycombine,"/",pt,".fcs"))
+  Merged_cycombine=as.data.frame(Merged_cycombine@exprs)
+  
+  Merged_cytobb=read.FCS(paste0(directory_cytobb,"/",pt,".fcs"))
+  Merged_cytobb=as.data.frame(Merged_cytobb@exprs)
+  
+  Merged_cytofmerge=read.FCS(paste0(directory_cytofmerge,"/",pt,".fcs"))
+  Merged_cytofmerge=as.data.frame(Merged_cytofmerge@exprs)
+
+  # Initialize
+  plot_list = list()
+
+  # Loop over each marker 
+  
+  selection = setdiff(colnames(Merged_basic), c("CD45", "CD19", "CD34","FSC.A","SSC.A","FSC.H","SSC.H"))
+  
+  for (marker in selection) {
+    
+  # Select sample size (minimum number of cell across method)
+  samp=min(length(na.omit(Original[[marker]])),nrow(Merged_basic),nrow(Merged_cycombine),nrow(Merged_cytobb),nrow(Merged_cytofmerge))
+  
+  # Sample
+  marker_original = na.omit(Original[[marker]])
+  marker_original = marker_original[sample(1:length(marker_original),samp)]
+  marker_basic = Merged_basic[sample(1:nrow(Merged_basic),samp),marker]
+  marker_cycombine = Merged_cycombine[sample(1:nrow(Merged_cycombine),samp), marker]
+  marker_cytobb = Merged_cytobb[sample(1:nrow(Merged_cytobb),samp), marker]
+  marker_cytofmerge = Merged_cytofmerge[sample(1:nrow(Merged_cytofmerge),samp),marker]
+    
+  # Combine 
+  df_combined = data.frame(
+    Value = c(marker_original,  marker_basic,marker_cytofmerge, marker_cytobb,  marker_cycombine),
+    Source = factor(c(rep("files", length(marker_original)),
+                      rep("Merged_basic", length(marker_basic)),
+                      rep("Merged_cytofmerge", length(marker_cytofmerge)),
+                      rep("Merged_cytobb", length(marker_cytobb)),
+                      rep("Merged_cycombine", length(marker_cycombine))),levels=c("files","Merged_basic","Merged_cytofmerge","Merged_cytobb","Merged_cycombine"))
+  )
+    
+  # Density plot 
+  p = ggplot(df_combined, aes(x = Value, color = Source)) +
+    geom_density(data = subset(df_combined, Source == "files"), aes(color = Source, fill = Source), alpha = 0.5, linewidth=1.5) +
+    geom_density(data = subset(df_combined, Source != "files"), aes(color = Source), alpha=0.2,fill = NA, linewidth=0.7) +
+    scale_color_manual(values = c("black", colors)) +   
+    scale_fill_manual(values = c("black", colors)) +
+    theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab(marker) +ylab("")+theme(legend.position = "none")
+    
+    # Add the plot to the list
+    plot_list[[marker]] = p
+  
+}
+
+  # Arrange and plot
+  pdf(paste0("Merging_densities_",pt,".pdf"),width=3,height=10) 
+  print(ggarrange(plotlist = plot_list, nrow = 9, ncol = 2))
+  dev.off()
+
+}
+
+```
+
+Scatter plots comparing backbone with a few relevant markers, for an example patient
+
+```{r}
+
+pt=patients_pre[1]
+
+# Read files without merging
+filenames=list.files(paste0(directory_pre,"/",pt),pattern = ".fcs",full.names = TRUE)
+files=list()
+for (i in 1:length(filenames)){
+  # Read FCS
+  data=read.FCS(filenames[i],truncate_max_range = FALSE,column.pattern = "Time",invert.pattern = TRUE) # Read
+  files[[i]]=as.data.frame(data@exprs)
+}
+markers=lapply(files,colnames)
+Original=rbindlist(files,fill=TRUE)
+  
+# Read merged files
+Merged_basic=read.FCS(paste0(directory_basic,"/",pt,".fcs"))
+Merged_basic=as.data.frame(Merged_basic@exprs)
+
+Merged_cycombine=read.FCS(paste0(directory_cycombine,"/",pt,".fcs"))
+Merged_cycombine=as.data.frame(Merged_cycombine@exprs)
+ 
+Merged_cytobb=read.FCS(paste0(directory_cytobb,"/",pt,".fcs"))
+Merged_cytobb=as.data.frame(Merged_cytobb@exprs)
+ 
+Merged_cytofmerge=read.FCS(paste0(directory_cytofmerge,"/",pt,".fcs"))
+Merged_cytofmerge=as.data.frame(Merged_cytofmerge@exprs)
+  
+# Initialize
+plot_list = list()
+
+# Select markers
+bbmarker=c("CD45","CD19","CD34")
+selection=c("CD10","CD20","CD38")
+
+# Loop over each marker
+for (i in 1:length(bbmarker)) {
+  
+    bb=bbmarker[i]
+    sel=selection[i]
+    n=length(na.omit(Original[[sel]]))
+    
+    p1 = ggplot(Original, aes_string(x = bb, y=sel)) + geom_hex(bins=50)+
+      theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+scale_y_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab("")+ylab("")+
+      theme(legend.position = "none",axis.text = element_text(color="black",size=12)) +
+  scale_fill_viridis_c()
+    
+    p2 = ggplot(Merged_basic[sample(1:nrow(Merged_basic),n),], aes_string(x = bb, y=sel)) + geom_hex(bins=50)+
+      theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+scale_y_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab("")+ylab("")+
+      theme(legend.position = "none",axis.text = element_text(color="black",size=12)) +
+  scale_fill_viridis_c()
+        
+    p3 = ggplot(Merged_cytofmerge[sample(1:nrow(Merged_cycombine),n),], aes_string(x = bb, y=sel)) + geom_hex(bins=50)+
+      theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+scale_y_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab("")+ylab("")+
+      theme(legend.position = "none",axis.text = element_text(color="black",size=12)) +
+  scale_fill_viridis_c()
+    
+    p4 = ggplot(Merged_cytobb[sample(1:nrow(Merged_basic),n),], aes_string(x = bb, y=sel)) + geom_hex(bins=50)+
+      theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+scale_y_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab("")+ylab("")+
+      theme(legend.position = "none",axis.text = element_text(color="black",size=12)) +
+  scale_fill_viridis_c()
+        
+    p5 = ggplot(Merged_cycombine[sample(1:nrow(Merged_cycombine),n),], aes_string(x = bb, y=sel)) + geom_hex(bins=50)+
+      theme_bw() + scale_x_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+scale_y_continuous(breaks=c(0,1),limits=c(-0.2,1.2))+xlab("")+ylab("")+
+      theme(legend.position = "none",axis.text = element_text(color="black",size=12)) +
+  scale_fill_viridis_c()
+    
+    # Add to the list
+    plot_list[[i]] = ggarrange(p1, p2, p3, p4, p5, nrow = 1, ncol = 5,align = "hv", widths = c(1, 1, 1, 1, 1)) 
+  
+}
+
+# Arrange and export
+pdf(paste0("Merging_2d_",pt,".pdf"),width=8,height=5)
+ggarrange(plotlist = plot_list, nrow = 3, ncol = 1, align = "hv",heights = c(-1, -1, -1)) 
+dev.off()
+
+```
+
+# Select a single method and plot 2d for all patients
+
+```{r}
+fcs_files = list.files(directory_cytobb, full.names = TRUE)
+
+# Initialize 
+plot_list_cd10_cd45 = list()
+plot_list_cd20_cd19 = list()
+plot_list_cd38_cd34 = list()
+
+# Loop through each FCS file and create the scatter plots
+for (i in 1:length(fcs_files)) {
+  
+  # Read FCS file
+  fcs_data = read.FCS(fcs_files[i])
+  
+  # Extract patient IDs
+  patient_id = tools::file_path_sans_ext(basename(fcs_files[i]))
+  
+  # Convert to dataframe
+  fcs_df = as.data.frame(exprs(fcs_data))
+  fcs_df = fcs_df[sample(1:nrow(fcs_df),min(10000,nrow(fcs_df))),]
+  
+    if (all(c("CD10", "CD45", "CD20", "CD19", "CD38", "CD34") %in% colnames(fcs_df))) {
+
+    p1 = ggplot(fcs_df, aes(x = CD45, y = CD10)) +
+      geom_hex(bins=80)  + xlab("")+ ylab("")+scale_x_continuous(limits=c(-0.2,1.2),breaks=c(0,1))+scale_y_continuous(limits=c(-0.1,1.1),breaks=c(0,1))+
+      ggtitle(patient_id) + scale_fill_viridis_c()+ 
+      theme_minimal()+ theme(legend.position = "none")
+    
+    p2 = ggplot(fcs_df, aes(x = CD19, y = CD20)) +
+      geom_hex(bins=80) + xlab("")+ ylab("")+scale_x_continuous(limits=c(-0.2,1.2),breaks=c(0,1))+scale_y_continuous(limits=c(-0.1,1.1),breaks=c(0,1))+
+      ggtitle(patient_id)+ scale_fill_viridis_c()+
+      theme_minimal()+ theme(legend.position = "none")
+    
+    p3 = ggplot(fcs_df, aes(x = CD34, y = CD38)) +
+       geom_hex(bins=80) + xlab("")+ ylab("")+scale_x_continuous(limits=c(-0.2,1.2),breaks=c(0,1))+scale_y_continuous(limits=c(-0.1,1.1),breaks=c(0,1))+
+      ggtitle(patient_id) + scale_fill_viridis_c()+ 
+      theme_minimal()+ theme(legend.position = "none")
+    
+    # Store
+    plot_list_cd10_cd45[[i]] = p1
+    plot_list_cd20_cd19[[i]] = p2
+    plot_list_cd38_cd34[[i]] = p3
+    }
+}
+
+# Plot all patients on single pages for each comparison
+
+# CD10 vs CD45
+pdf("CD10_CD45.pdf",width=22,height=20)
+ggarrange(plotlist = plot_list_cd10_cd45, ncol = 11, nrow = 10)
+dev.off()
+
+# CD20 vs CD19
+pdf("CD20_CD19.pdf",width=22,height=20)
+ggarrange(plotlist = plot_list_cd20_cd19, ncol = 11, nrow = 10)
+dev.off()
+
+# CD38 vs CD34
+pdf("CD38_CD34.pdf",width=22,height=20)
+ggarrange(plotlist = plot_list_cd38_cd34, ncol = 11, nrow = 10)
+dev.off()
+
+```
+
+
+
+
+
